@@ -18,15 +18,21 @@ pub fn install_hint(logical: &str) -> String {
         "sudo pacman -S --needed"
     };
     match logical {
-        "yt-dlp" => format!("Missing yt-dlp. Re-run `npm run sidecars`, or install it: {cmd} yt-dlp"),
-        "gallery-dl" => {
-            format!("Missing gallery-dl. Re-run `npm run sidecars` (needs Python 3.10+ to build).")
+        "yt-dlp" => {
+            format!("Missing yt-dlp. Re-run `npm run sidecars`, or install it: {cmd} yt-dlp")
         }
-        "aria2c" => format!("Missing aria2c. Re-run `npm run sidecars`, or install it: {cmd} aria2"),
-        "spotdl" => format!("Missing spotDL. Re-run `npm run sidecars`."),
-        "ffmpeg" => format!(
+        "gallery-dl" => {
+            "Missing gallery-dl. Re-run `npm run sidecars` (needs Python 3.10+ to build)."
+                .to_string()
+        }
+        "aria2c" => {
+            format!("Missing aria2c. Re-run `npm run sidecars`, or install it: {cmd} aria2")
+        }
+        "spotdl" => "Missing spotDL. Re-run `npm run sidecars`.".to_string(),
+        "ffmpeg" => {
             "Missing ffmpeg. Re-run `npm run sidecars` (it copies the ffmpeg-static binary)."
-        ),
+                .to_string()
+        }
         _ => "Missing binary.".to_string(),
     }
 }
@@ -45,7 +51,10 @@ pub fn resolve_sidecar_path(app: &AppHandle, logical: &str) -> Option<PathBuf> {
     let triple = target_triple();
     let dev = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
-        .join(format!("{logical}-{triple}{}", std::env::consts::EXE_SUFFIX));
+        .join(format!(
+            "{logical}-{triple}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
     if dev.exists() {
         return Some(dev);
     }
@@ -78,10 +87,9 @@ async fn run_version(app: &AppHandle, logical: &str) -> Result<String, String> {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .or_else(|| {
-            stderr
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty() && !l.starts_with("sh:") && !l.contains("symbol lookup error"))
+            stderr.lines().map(str::trim).find(|l| {
+                !l.is_empty() && !l.starts_with("sh:") && !l.contains("symbol lookup error")
+            })
         })
         .unwrap_or("")
         .to_string();

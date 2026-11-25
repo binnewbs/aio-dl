@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { FolderOpenIcon, SaveIcon, SettingsIcon } from 'lucide-react'
 import type { Settings } from '@/lib/types'
@@ -43,9 +43,13 @@ export function SettingsView() {
   const [draft, setDraft] = useState<Settings | null>(settings)
   const [saving, setSaving] = useState(false)
 
-  useEffect(() => {
+  // Re-seed the draft when settings arrive from the backend, using the
+  // "adjust state during render" pattern instead of an effect.
+  const [seededFrom, setSeededFrom] = useState<Settings | null>(settings)
+  if (settings !== seededFrom) {
+    setSeededFrom(settings)
     setDraft(settings)
-  }, [settings])
+  }
 
   if (!draft) {
     return (

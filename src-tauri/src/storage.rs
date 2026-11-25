@@ -73,8 +73,12 @@ pub fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String>
         return Err("Output directory cannot be empty.".into());
     }
     let dir = data_dir(app)?;
-    std::fs::create_dir_all(&settings.output_dir)
-        .map_err(|e| format!("Cannot create output directory {}: {e}", settings.output_dir))?;
+    std::fs::create_dir_all(&settings.output_dir).map_err(|e| {
+        format!(
+            "Cannot create output directory {}: {e}",
+            settings.output_dir
+        )
+    })?;
     write_json(&dir.join(SETTINGS_FILE), settings)
 }
 

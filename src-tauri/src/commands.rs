@@ -1,9 +1,7 @@
 use crate::binaries;
 use crate::jobs::{self, SharedJobs};
 use crate::storage;
-use crate::types::{
-    AppInfo, BinaryStatus, HistoryEntry, JobRequest, JobSnapshot, Settings,
-};
+use crate::types::{AppInfo, BinaryStatus, HistoryEntry, JobRequest, JobSnapshot, Settings};
 use tauri::{AppHandle, State};
 
 #[tauri::command]
@@ -92,6 +90,11 @@ pub fn app_info(app: AppHandle) -> AppInfo {
 #[tauri::command]
 pub fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+
     // Opening the containing directory is friendlier than launching the file.
     let target = std::path::Path::new(&path);
     let to_open = if target.is_dir() {
@@ -102,10 +105,6 @@ pub fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| target.to_path_buf())
     };
-
-    if !to_open.exists() {
-        return Err(format!("Path does not exist: {}", to_open.display()));
-    }
 
     app.opener()
         .open_path(to_open.display().to_string(), None::<&str>)

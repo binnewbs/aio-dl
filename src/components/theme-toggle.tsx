@@ -1,43 +1,31 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { MoonIcon, SunIcon } from 'lucide-react'
+import { applyTheme, initialTheme, persistTheme, type Theme } from '@/lib/theme'
 import { Button } from '@/components/ui/button'
 
-type Theme = 'light' | 'dark'
-
-const STORAGE_KEY = 'aio-dl-theme'
-
-function initialTheme(): Theme {
-  const stored = localStorage.getItem(STORAGE_KEY)
-  if (stored === 'light' || stored === 'dark') return stored
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-}
-
-function applyTheme(theme: Theme) {
-  document.documentElement.classList.toggle('dark', theme === 'dark')
-}
-
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>(initialTheme)
+  const [theme, setTheme] = useState<Theme>(() => {
+    const current = initialTheme()
+    applyTheme(current)
+    return current
+  })
 
-  useEffect(() => {
-    applyTheme(theme)
-    localStorage.setItem(STORAGE_KEY, theme)
-  }, [theme])
+  function toggle() {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark'
+    applyTheme(next)
+    persistTheme(next)
+    setTheme(next)
+  }
 
   return (
     <Button
       variant="ghost"
       size="icon-sm"
-      onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+      onClick={toggle}
       aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
       title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
     >
       {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
     </Button>
   )
-}
-
-/** Applies the stored theme before first paint to avoid a flash. */
-export function initTheme() {
-  applyTheme(initialTheme())
 }

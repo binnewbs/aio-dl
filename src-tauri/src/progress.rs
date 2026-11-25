@@ -72,7 +72,11 @@ pub fn parse_eta(raw: &str) -> Option<u64> {
 
     let parts: Vec<&str> = s.split(':').collect();
     match parts.len() {
-        1 => parts[0].trim().parse::<f64>().ok().map(|v| v.max(0.0) as u64),
+        1 => parts[0]
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| v.max(0.0) as u64),
         2 => {
             let m: u64 = parts[0].trim().parse().ok()?;
             let sec: u64 = parts[1].trim().parse().ok()?;
@@ -109,16 +113,17 @@ fn split_number_unit(s: &str) -> Option<(String, String)> {
 /// Pulls the trailing filename out of a URL path, ignoring the host and query.
 pub fn file_name_from_url(url: &str) -> Option<String> {
     let without_fragment = url.split('#').next().unwrap_or(url);
-    let without_query = without_fragment.split('?').next().unwrap_or(without_fragment);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
 
     // Drop the scheme and host so a bare origin never looks like a filename.
     let path = match without_query.find("://") {
         Some(idx) => {
             let after_scheme = &without_query[idx + 3..];
-            match after_scheme.find('/') {
-                Some(slash) => &after_scheme[slash..],
-                None => return None,
-            }
+            let slash = after_scheme.find('/')?;
+            &after_scheme[slash..]
         }
         None => without_query,
     };
@@ -139,12 +144,10 @@ fn percent_decode(input: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(h) = hex {
-                if let Ok(v) = u8::from_str_radix(h, 16) {
-                    out.push(v);
-                    i += 3;
-                    continue;
-                }
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
             }
         }
         out.push(bytes[i]);

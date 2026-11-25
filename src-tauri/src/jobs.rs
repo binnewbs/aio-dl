@@ -1,15 +1,15 @@
-use crate::backends::{driver_for, ParseState};
+use crate::backends::{ParseState, driver_for};
 use crate::binaries::{backend_logical_name, ffmpeg_path};
 use crate::progress::file_name_from_url;
 use crate::storage;
 use crate::types::{
-    now_millis, HistoryEntry, JobRequest, JobSnapshot, JobStatus, ProgressDelta, Settings,
+    HistoryEntry, JobRequest, JobSnapshot, JobStatus, ProgressDelta, Settings, now_millis,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 
 const LOG_TAIL_LIMIT: usize = 200;
 
@@ -35,10 +35,7 @@ fn emit_job(app: &AppHandle, job: &JobSnapshot) {
 }
 
 fn emit_log(app: &AppHandle, id: &str, line: String) {
-    let _ = app.emit(
-        "job:log",
-        serde_json::json!({ "id": id, "line": line }),
-    );
+    let _ = app.emit("job:log", serde_json::json!({ "id": id, "line": line }));
 }
 
 /// Builds a fresh queued snapshot for a download request.
@@ -118,7 +115,10 @@ fn history_from(job: &JobSnapshot) -> HistoryEntry {
         backend: job.backend,
         status: job.status,
         output_path: job.output_path.clone(),
-        total_bytes: job.total_bytes.or(Some(job.downloaded_bytes)).filter(|v| *v > 0),
+        total_bytes: job
+            .total_bytes
+            .or(Some(job.downloaded_bytes))
+            .filter(|v| *v > 0),
         error: job.error.clone(),
         created_at: job.created_at,
         finished_at: job.finished_at,
@@ -148,17 +148,22 @@ pub fn pump(app: AppHandle, shared: SharedJobs) -> Result<(), String> {
         let limit = settings.max_concurrent.max(1) as usize;
         let mut started = Vec::new();
 
-        while manager.running.len() < limit {
+        // Count already-running jobs plus the ones reserved in this batch, so a
+        // single pump call can never exceed the limit.
+        while manager.running.len() + started.len() < limit {
             let Some(next_id) = manager.queue.pop_front() else {
                 break;
             };
-            let Some(job) = manager.jobs.get(&next_id).cloned() else {
+            let Some(job) = manager.jobs.get_mut(&next_id) else {
                 continue;
             };
             if job.status != JobStatus::Queued {
                 continue;
             }
-            started.push(job);
+            // Reserve the slot before spawning; spawn_job re-emits Running.
+            job.status = JobStatus::Running;
+            job.message = Some(format!("Starting {}", job.backend.display_name()));
+            started.push(job.clone());
         }
         started
     };
@@ -174,16 +179,21 @@ fn spawn_job(app: AppHandle, shared: SharedJobs, job: JobSnapshot, settings: Set
     let backend = job.backend;
     let logical = backend_logical_name(backend);
 
-    // Mark running before spawning so the UI updates immediately.
+    // The user may have cancelled between pump() and this call. Also re-emit the
+    // reserved Running state so the UI reflects the transition immediately.
     {
         let Ok(mut manager) = shared.lock() else {
             return;
         };
-        if let Some(entry) = manager.jobs.get_mut(&id) {
-            entry.status = JobStatus::Running;
-            entry.message = Some(format!("Starting {}", backend.display_name()));
-            emit_job(&app, entry);
+        let Some(entry) = manager.jobs.get_mut(&id) else {
+            return;
+        };
+        if entry.status != JobStatus::Running {
+            // Cancelled (or otherwise finished) before the process started.
+            return;
         }
+        entry.message = Some(format!("Starting {}", backend.display_name()));
+        emit_job(&app, entry);
     }
 
     let app_for_task = app.clone();
@@ -249,7 +259,15 @@ fn spawn_job(app: AppHandle, shared: SharedJobs, job: JobSnapshot, settings: Set
                 CommandEvent::Stdout(bytes) => {
                     let line = String::from_utf8_lossy(&bytes).to_string();
                     for chunk in line.lines() {
-                        handle_line(&app_for_task, &shared_for_task, &id, driver.as_ref(), chunk, &mut state, &mut last_error);
+                        handle_line(
+                            &app_for_task,
+                            &shared_for_task,
+                            &id,
+                            driver.as_ref(),
+                            chunk,
+                            &mut state,
+                            &mut last_error,
+                        );
                     }
                 }
                 CommandEvent::Stderr(bytes) => {
@@ -261,7 +279,15 @@ fn spawn_job(app: AppHandle, shared: SharedJobs, job: JobSnapshot, settings: Set
                                 last_error = Some(trimmed.to_string());
                             }
                         }
-                        handle_line(&app_for_task, &shared_for_task, &id, driver.as_ref(), chunk, &mut state, &mut last_error);
+                        handle_line(
+                            &app_for_task,
+                            &shared_for_task,
+                            &id,
+                            driver.as_ref(),
+                            chunk,
+                            &mut state,
+                            &mut last_error,
+                        );
                     }
                 }
                 CommandEvent::Terminated(payload) => {
@@ -411,9 +437,35 @@ fn finish_job(
 
         if status == JobStatus::Completed {
             job.percent = Some(100.0);
+
+            // Trust the filesystem over the backend's often-missing size field
+            // (yt-dlp reports `NA` for total_bytes_estimate on many sites).
+            if let Some(meta) = job
+                .output_path
+                .as_deref()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .filter(|meta| meta.is_file())
+            {
+                let size = meta.len();
+                job.downloaded_bytes = size;
+                job.total_bytes = Some(size);
+            }
+
             if job.total_bytes.is_none() && job.downloaded_bytes > 0 {
                 job.total_bytes = Some(job.downloaded_bytes);
             }
+
+            // Replace a URL-only title with the actual downloaded file name.
+            if (job.title == job.url || job.title.trim().is_empty())
+                && let Some(name) = job
+                    .output_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).file_name())
+                    .and_then(|n| n.to_str())
+            {
+                job.title = name.to_string();
+            }
+
             job.message = Some("Completed".into());
         } else if status == JobStatus::Failed {
             job.error = error.clone();
@@ -428,6 +480,41 @@ fn finish_job(
 
     let _ = storage::append_history(app, history_from(&finished));
     let _ = app.emit("history:changed", ());
+
+    // Optionally reveal the finished file in the OS file manager.
+    if finished.status == JobStatus::Completed {
+        let settings = storage::load_settings(app);
+        if settings.open_folder_on_complete {
+            let target = finished
+                .output_path
+                .clone()
+                .unwrap_or_else(|| settings.output_dir.clone());
+            reveal_in_file_manager(app, &target);
+        }
+    }
+}
+
+/// Opens the containing folder of `path` (or `path` itself if it is a directory).
+fn reveal_in_file_manager(app: &AppHandle, path: &str) {
+    use tauri_plugin_opener::OpenerExt;
+
+    let target = std::path::Path::new(path);
+    let to_open = if target.is_dir() {
+        target.to_path_buf()
+    } else {
+        target
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| target.to_path_buf())
+    };
+
+    if !to_open.exists() {
+        return;
+    }
+
+    let _ = app
+        .opener()
+        .open_path(to_open.display().to_string(), None::<&str>);
 }
 
 /// Cancels a queued or running job.

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import * as ipc from './ipc'
+import { toast } from '@/components/ui/toast'
 import type {
   Backend,
   BinaryStatus,
@@ -253,7 +254,26 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   applyJobUpdate: (job) => {
+    const previous = get().jobs.find((existing) => existing.id === job.id)
+
     set((state) => ({ jobs: upsertJob(state.jobs, job) }))
+
+    // Announce terminal transitions exactly once.
+    if (previous && previous.status !== job.status) {
+      if (job.status === 'completed') {
+        toast.add({
+          title: 'Download complete',
+          description: job.title,
+          type: 'success',
+        })
+      } else if (job.status === 'failed') {
+        toast.add({
+          title: 'Download failed',
+          description: job.error ?? job.title,
+          type: 'error',
+        })
+      }
+    }
   },
 
   setError: (message) => set({ error: message }),

@@ -1,11 +1,12 @@
-mod backends;
-mod binaries;
 mod commands;
 mod detect;
 mod jobs;
 mod progress;
 mod storage;
-mod types;
+
+pub mod backends;
+pub mod binaries;
+pub mod types;
 
 use jobs::SharedJobs;
 use tauri::Manager;

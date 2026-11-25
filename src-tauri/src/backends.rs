@@ -7,17 +7,16 @@ use regex::Regex;
 /// stdout/stderr lines into progress deltas.
 pub trait BackendDriver: Send + Sync {
     /// Full argv (program name excluded) for the download.
-    fn args(&self, job: &JobRequest, settings: &Settings, ffmpeg_path: Option<&str>) -> Vec<String>;
+    fn args(&self, job: &JobRequest, settings: &Settings, ffmpeg_path: Option<&str>)
+    -> Vec<String>;
 
-    /// Parses autocorrect one stdout line into a progress update, if it carries any.
+    /// Parses one stdout line into a progress update, if it carries any.
     fn parse_line(&self, line: &str, state: &mut ParseState) -> Option<ProgressDelta>;
 
     /// Whether the line indicates the backend reported a failure.
     fn is_error_line(&self, line: &str) -> bool {
         let lower = line.to_ascii_lowercase();
-        lower.starts_with("error:")
-            || lower.contains("[error]")
-            || lower.contains("error: ")
+        lower.starts_with("error:") || lower.contains("[error]") || lower.contains("error: ")
     }
 }
 
@@ -78,14 +77,16 @@ fn push_extra(args: &mut Vec<String>, raw: &str) {
 pub struct YtDlpDriver;
 
 static YTDLP_PROGRESS: Lazy<Regex> = Lazy::new(|| {
+    // percent|speed|eta|downloaded|total|total_estimate  (the last two may be "NA")
     Regex::new(
-        r"^download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|(?P<downloaded>[^|]*)\|(?P<total>.*)$",
+        r"^download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|(?P<downloaded>[^|]*)\|(?P<total>[^|]*)\|(?P<estimate>.*)$",
     )
     .expect("valid yt-dlp progress regex")
 });
 
 static YTDLP_DEST: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^\[download\]\s+Destination:\s+(?P<path>.+)$").expect("valid destination regex")
+    Regex::new(r"(?i)^\[download\]\s+Destination:\s+(?P<path>.+)$")
+        .expect("valid destination regex")
 });
 
 static YTDLP_ALREADY: Lazy<Regex> = Lazy::new(|| {
@@ -94,7 +95,12 @@ static YTDLP_ALREADY: Lazy<Regex> = Lazy::new(|| {
 });
 
 impl BackendDriver for YtDlpDriver {
-    fn args(&self, job: &JobRequest, settings: &Settings, ffmpeg_path: Option<&str>) -> Vec<String> {
+    fn args(
+        &self,
+        job: &JobRequest,
+        settings: &Settings,
+        ffmpeg_path: Option<&str>,
+    ) -> Vec<String> {
         let mut args: Vec<String> = vec![
             "-P".into(),
             settings.output_dir.clone(),
@@ -102,7 +108,7 @@ impl BackendDriver for YtDlpDriver {
             "--no-colors".into(),
             "--progress".into(),
             "--progress-template".into(),
-            "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s"
+            "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s"
                 .into(),
             "--print".into(),
             "after_move:filepath".into(),
@@ -132,7 +138,11 @@ impl BackendDriver for YtDlpDriver {
             }
         }
 
-        if let Some(cookies) = settings.cookie_file.as_ref().filter(|c| !c.trim().is_empty()) {
+        if let Some(cookies) = settings
+            .cookie_file
+            .as_ref()
+            .filter(|c| !c.trim().is_empty())
+        {
             args.push("--cookies".into());
             args.push(cookies.clone());
         }
@@ -157,10 +167,17 @@ impl BackendDriver for YtDlpDriver {
                 .name("downloaded")
                 .and_then(|m| m.as_str().trim().parse::<u64>().ok());
 
+            // Prefer the exact total; fall back to the estimate (yt-dlp reports
+            // `NA` for both on some sites).
             let total = caps
                 .name("total")
                 .and_then(|m| m.as_str().trim().parse::<u64>().ok())
-                .filter(|v| *v > 0);
+                .filter(|v| *v > 0)
+                .or_else(|| {
+                    caps.name("estimate")
+                        .and_then(|m| m.as_str().trim().parse::<u64>().ok())
+                        .filter(|v| *v > 0)
+                });
 
             if total.is_some() {
                 state.total_bytes = total;
@@ -245,7 +262,11 @@ impl BackendDriver for GalleryDlDriver {
             "--no-mtime".into(),
         ];
 
-        if let Some(cookies) = settings.cookie_file.as_ref().filter(|c| !c.trim().is_empty()) {
+        if let Some(cookies) = settings
+            .cookie_file
+            .as_ref()
+            .filter(|c| !c.trim().is_empty())
+        {
             args.push("--cookies".into());
             args.push(cookies.clone());
         }
@@ -335,7 +356,8 @@ static ARIA2_ETA: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"ETA:(?P<eta>[0-9:]+)").expect("valid aria2 ETA regex"));
 
 static ARIA2_SAVED: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^Download complete:\s*(?P<path>.+)$").expect("valid aria2 complete regex")
+    // aria2 prepends a timestamp: `11/25 10:12:07 [NOTICE] Download complete: ./file`
+    Regex::new(r"(?i)Download complete:\s*(?P<path>.+)$").expect("valid aria2 complete regex")
 });
 
 impl BackendDriver for Aria2Driver {
@@ -367,7 +389,11 @@ impl BackendDriver for Aria2Driver {
             args.push("--check-certificate=false".into());
         }
 
-        if let Some(cookies) = settings.cookie_file.as_ref().filter(|c| !c.trim().is_empty()) {
+        if let Some(cookies) = settings
+            .cookie_file
+            .as_ref()
+            .filter(|c| !c.trim().is_empty())
+        {
             args.push("--load-cookies".into());
             args.push(cookies.clone());
         }
@@ -453,20 +479,27 @@ static SPOT_DONE: Lazy<Regex> = Lazy::new(|| {
 });
 
 impl BackendDriver for SpotDlDriver {
-    fn args(&self, job: &JobRequest, settings: &Settings, ffmpeg_path: Option<&str>) -> Vec<String> {
+    fn args(
+        &self,
+        job: &JobRequest,
+        settings: &Settings,
+        ffmpeg_path: Option<&str>,
+    ) -> Vec<String> {
         let output_template = format!(
             "{}/{{artists}} - {{title}}.{{output-ext}}",
             settings.output_dir.trim_end_matches('/')
         );
 
-        let mut args: Vec<String> = vec![
-            "download".into(),
-            job.url.clone(),
-        ];
+        // spotDL (argparse) has no `--` end-of-options separator, so a query that
+        // starts with `-` would be parsed as a flag. Prefix such queries with a
+        // space, which argparse treats as a positional value.
+        let query = if job.url.starts_with('-') {
+            format!(" {}", job.url)
+        } else {
+            job.url.clone()
+        };
 
-        // spotDL's own flags come before `--`; the query above is not an option
-        // because it is positional and spotDL does not treat it as a flag unless
-        // it starts with `-`. Guard that case explicitly.
+        let mut args: Vec<String> = vec!["download".into(), query];
         args.push("--output".into());
         args.push(output_template);
         args.push("--simple-tui".into());
@@ -485,7 +518,11 @@ impl BackendDriver for SpotDlDriver {
             args.push("--ffmpeg".into());
             args.push(ffmpeg.to_string());
         }
-        if let Some(cookies) = settings.cookie_file.as_ref().filter(|c| !c.trim().is_empty()) {
+        if let Some(cookies) = settings
+            .cookie_file
+            .as_ref()
+            .filter(|c| !c.trim().is_empty())
+        {
             args.push("--cookie-file".into());
             args.push(cookies.clone());
         }
@@ -504,17 +541,19 @@ impl BackendDriver for SpotDlDriver {
             return None;
         }
 
-        if let Some(caps) = SPOT_FOUND.captures(trimmed) {
-            if let Some(total) = caps.name("total").and_then(|m| m.as_str().parse::<u64>().ok()) {
-                state.items_total = Some(total);
-                return Some(ProgressDelta {
-                    items_done: Some(state.items_done),
-                    items_total: Some(total),
-                    percent: Some(0.0),
-                    message: Some(format!("Found {total} song(s)")),
-                    ..Default::default()
-                });
-            }
+        if let Some(total) = SPOT_FOUND
+            .captures(trimmed)
+            .and_then(|caps| caps.name("total"))
+            .and_then(|m| m.as_str().parse::<u64>().ok())
+        {
+            state.items_total = Some(total);
+            return Some(ProgressDelta {
+                items_done: Some(state.items_done),
+                items_total: Some(total),
+                percent: Some(0.0),
+                message: Some(format!("Found {total} song(s)")),
+                ..Default::default()
+            });
         }
 
         if SPOT_DONE.is_match(trimmed) {
@@ -597,7 +636,11 @@ mod tests {
     #[test]
     fn ytdlp_args_end_with_separator_and_url() {
         let d = YtDlpDriver;
-        let args = d.args(&job("https://youtu.be/x", Backend::Ytdlp), &settings(), Some("/opt"));
+        let args = d.args(
+            &job("https://youtu.be/x", Backend::Ytdlp),
+            &settings(),
+            Some("/opt"),
+        );
         assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args[args.len() - 1], "https://youtu.be/x");
         assert!(args.contains(&"--ffmpeg-location".to_string()));
@@ -607,12 +650,11 @@ mod tests {
     #[test]
     fn ytdlp_url_cannot_inject_flags() {
         let d = YtDlpDriver;
-        let args = d.args(
-            &job("--exec=rm -rf /", Backend::Ytdlp),
-            &settings(),
-            None,
-        );
-        let idx = args.iter().position(|a| a == "--").expect("separator present");
+        let args = d.args(&job("--exec=rm -rf /", Backend::Ytdlp), &settings(), None);
+        let idx = args
+            .iter()
+            .position(|a| a == "--")
+            .expect("separator present");
         assert_eq!(idx, args.len() - 2);
     }
 
@@ -622,7 +664,7 @@ mod tests {
         let mut state = ParseState::default();
         let delta = d
             .parse_line(
-                "download:  45.2%| 1.5MiB/s|00:12|1048576|2320000",
+                "download:  45.2%| 1.5MiB/s|00:12|1048576|2320000|2320000",
                 &mut state,
             )
             .expect("parsed");
@@ -637,11 +679,33 @@ mod tests {
     fn ytdlp_progress_keeps_total_when_missing() {
         let d = YtDlpDriver;
         let mut state = ParseState::default();
-        let _ = d.parse_line("download:  10%| 1MiB/s|00:30|100|1000", &mut state);
+        let _ = d.parse_line("download:  10%| 1MiB/s|00:30|100|1000|1000", &mut state);
         let delta = d
-            .parse_line("download:  20%| 1MiB/s|00:25|200|NA", &mut state)
+            .parse_line("download:  20%| 1MiB/s|00:25|200|NA|NA", &mut state)
             .expect("parsed");
         assert_eq!(delta.total_bytes, Some(1000));
+    }
+
+    #[test]
+    fn ytdlp_falls_back_to_estimate_when_total_missing() {
+        let d = YtDlpDriver;
+        let mut state = ParseState::default();
+        let delta = d
+            .parse_line("download:  30%| 1MiB/s|00:20|300|NA|1000", &mut state)
+            .expect("parsed");
+        assert_eq!(delta.total_bytes, Some(1000));
+        assert_eq!(delta.percent, Some(30.0));
+    }
+
+    #[test]
+    fn ytdlp_handles_both_sizes_missing() {
+        let d = YtDlpDriver;
+        let mut state = ParseState::default();
+        let delta = d
+            .parse_line("download:  30%| 1MiB/s|00:20|300|NA|NA", &mut state)
+            .expect("parsed");
+        assert_eq!(delta.total_bytes, None);
+        assert_eq!(delta.downloaded_bytes, Some(300));
     }
 
     #[test]
@@ -668,7 +732,9 @@ mod tests {
     fn gallery_dl_reads_counts() {
         let d = GalleryDlDriver;
         let mut state = ParseState::default();
-        let delta = d.parse_line("[pixiv][info] 5/20", &mut state).expect("counts");
+        let delta = d
+            .parse_line("[pixiv][info] 5/20", &mut state)
+            .expect("counts");
         assert_eq!(delta.items_done, Some(5));
         assert_eq!(delta.items_total, Some(20));
         assert_eq!(delta.percent, Some(25.0));
@@ -702,10 +768,27 @@ mod tests {
     }
 
     #[test]
+    fn aria2_complete_line_is_timestamped() {
+        let d = Aria2Driver;
+        let mut state = ParseState::default();
+        // Real aria2 output includes a timestamp and a level tag.
+        let delta = d
+            .parse_line(
+                "11/25 10:12:07 [NOTICE] Download complete: /tmp/out/sample.bin",
+                &mut state,
+            )
+            .expect("parsed");
+        assert_eq!(delta.output_path.as_deref(), Some("/tmp/out/sample.bin"));
+        assert_eq!(delta.percent, Some(100.0));
+    }
+
+    #[test]
     fn spotdl_counts_songs() {
         let d = SpotDlDriver;
         let mut state = ParseState::default();
-        let found = d.parse_line("Found 4 songs in playlist", &mut state).expect("found");
+        let found = d
+            .parse_line("Found 4 songs in playlist", &mut state)
+            .expect("found");
         assert_eq!(found.items_total, Some(4));
         let done = d
             .parse_line("Downloaded \"Song\" \u{2192} /tmp/out/song.mp3", &mut state)
@@ -724,7 +807,20 @@ mod tests {
         );
         assert_eq!(args[0], "download");
         let out_idx = args.iter().position(|a| a == "--output").unwrap();
-        assert_eq!(args[out_idx + 1], "/tmp/out/{artists} - {title}.{output-ext}");
+        assert_eq!(
+            args[out_idx + 1],
+            "/tmp/out/{artists} - {title}.{output-ext}"
+        );
         assert!(args.iter().any(|a| a == "/opt/ffmpeg"));
+    }
+
+    #[test]
+    fn spotdl_dash_query_cannot_be_read_as_a_flag() {
+        let d = SpotDlDriver;
+        let args = d.args(&job("--version", Backend::SpotDl), &settings(), None);
+        assert_eq!(args[0], "download");
+        // The query must be neutralised so argparse treats it as search text.
+        assert_eq!(args[1], " --version");
+        assert!(!args.iter().any(|a| a == "--version"));
     }
 }
