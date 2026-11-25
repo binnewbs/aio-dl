@@ -31,6 +31,26 @@ pub enum JobStatus {
     Interrupted,
 }
 
+/// Per-download format override for yt-dlp. Any `None` field falls back to the
+/// value stored in [`Settings`], so an empty override behaves like "use my
+/// defaults".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatOverride {
+    /// yt-dlp `-f` expression, e.g. `bv*[height<=720]+ba/b[height<=720]`.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Extract audio instead of saving video.
+    #[serde(default)]
+    pub audio_only: Option<bool>,
+    /// Audio container when `audio_only` is set (`mp3`, `m4a`, …).
+    #[serde(default)]
+    pub audio_format: Option<String>,
+    /// Merge container when saving video (`mp4`, `mkv`, …).
+    #[serde(default)]
+    pub container: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobRequest {
@@ -42,6 +62,9 @@ pub struct JobRequest {
     /// Optional title hint supplied by the UI (e.g. the page title).
     #[serde(default)]
     pub title: Option<String>,
+    /// Optional per-job yt-dlp format choice, set from the Downloads view.
+    #[serde(default)]
+    pub format: Option<FormatOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +90,9 @@ pub struct JobSnapshot {
     pub created_at: i64,
     pub finished_at: Option<i64>,
     pub log_tail: Vec<String>,
+    /// The format chosen for this download, kept so retries reuse it.
+    #[serde(default)]
+    pub format: Option<FormatOverride>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

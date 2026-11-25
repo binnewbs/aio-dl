@@ -27,6 +27,7 @@ export interface JobSnapshot {
   createdAt: number
   finishedAt: number | null
   logTail: string[]
+  format?: FormatOverride | null
 }
 
 export interface JobRequest {
@@ -34,6 +35,15 @@ export interface JobRequest {
   backend: Backend
   outputDir?: string | null
   title?: string | null
+  format?: FormatOverride | null
+}
+
+/** Per-download yt-dlp format choice; unset fields fall back to Settings. */
+export interface FormatOverride {
+  format?: string | null
+  audioOnly?: boolean | null
+  audioFormat?: string | null
+  container?: string | null
 }
 
 export interface BackendArgs {

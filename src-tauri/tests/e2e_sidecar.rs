@@ -118,6 +118,7 @@ fn aria2_downloads_through_real_driver_argv() {
         backend: Backend::Aria2,
         output_dir: None,
         title: None,
+        format: None,
     };
 
     let driver = driver_for(Backend::Aria2);
@@ -169,6 +170,95 @@ fn aria2_downloads_through_real_driver_argv() {
     assert!(
         parsed.ends_with("sample.bin"),
         "unexpected parsed path: {parsed}"
+    );
+
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
+
+#[test]
+fn yt_dlp_template_round_trips_through_the_parser() {
+    // Guards the bug where `--progress-template "download:..."` had its prefix
+    // stripped by yt-dlp, so the parser never matched and the UI bar stayed 0.
+    let binary = sidecar_path("yt-dlp");
+    if !binary.exists() {
+        eprintln!(
+            "skipping: {} not found (run `npm run sidecars`)",
+            binary.display()
+        );
+        return;
+    }
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let (port, server) = start_server(shutdown.clone());
+
+    let out_dir = std::env::temp_dir().join(format!("aio-dl-ytdlp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let driver = driver_for(Backend::Ytdlp);
+    let settings = test_settings(out_dir.clone());
+    let job = JobRequest {
+        url: format!("http://127.0.0.1:{port}/sample.bin"),
+        backend: Backend::Ytdlp,
+        output_dir: None,
+        title: None,
+        format: None,
+    };
+
+    // Use the driver's own argv so the template stays in sync with production.
+    let args = driver.args(&job, &settings, None);
+    let output = Command::new(&binary)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run yt-dlp sidecar");
+
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = server.join();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let mut state = ParseState::default();
+    let mut percents = Vec::new();
+    let mut reported_path: Option<String> = None;
+
+    for line in stdout.lines().chain(stderr.lines()) {
+        if let Some(delta) = driver.parse_line(line, &mut state) {
+            if let Some(p) = delta.percent {
+                percents.push(p);
+            }
+            if let Some(path) = delta.output_path {
+                reported_path = Some(path);
+            }
+        }
+    }
+
+    // The whole point: at least one progress tick must parse.
+    assert!(
+        !percents.is_empty(),
+        "no progress parsed from yt-dlp.\nargs: {args:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        percents.iter().all(|p| (0.0..=100.0).contains(p)),
+        "percent out of range: {percents:?}"
+    );
+    // Progress must reach 100% for a complete download.
+    assert!(
+        percents.iter().any(|p| *p >= 99.0),
+        "progress never reached 100%: {percents:?}"
+    );
+    // yt-dlp renames unknown extensions, so assert it reported *a* path that
+    // lives in our output directory rather than guessing the exact filename.
+    let path = reported_path.expect("yt-dlp did not report an artifact path");
+    assert!(
+        path.starts_with(&out_dir.display().to_string()),
+        "artifact path outside output dir: {path}"
+    );
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "reported artifact does not exist: {path}"
     );
 
     let _ = std::fs::remove_dir_all(&out_dir);

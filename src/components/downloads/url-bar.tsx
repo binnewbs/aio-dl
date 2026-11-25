@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/select'
 import { Spinner } from '@/components/ui/spinner'
 import { Separator } from '@/components/ui/separator'
+import { FormatPicker } from '@/components/downloads/format-picker'
 
 export function UrlBar() {
   const url = useAppStore((s) => s.url)
@@ -194,6 +195,14 @@ export function UrlBar() {
               ? `${meta.description} · ${meta.accepts}`
               : 'Plain text is treated as a spotDL search query.'}
           </FieldDescription>
+
+          {/* Only yt-dlp has meaningful format choices. */}
+          {effective === 'ytdlp' ? (
+            <>
+              <Separator />
+              <FormatPicker />
+            </>
+          ) : null}
         </FieldGroup>
       </CardContent>
     </Card>

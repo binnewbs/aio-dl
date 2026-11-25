@@ -4,6 +4,7 @@ import { toast } from '@/components/ui/toast'
 import type {
   Backend,
   BinaryStatus,
+  FormatOverride,
   HistoryEntry,
   JobSnapshot,
   Settings,
@@ -11,6 +12,34 @@ import type {
 import { detectBackend, normalizeInput, refineWithProbe } from './detect'
 
 export type ViewKey = 'downloads' | 'history' | 'doctor' | 'settings'
+
+/**
+ * The Downloads-view format picker for yt-dlp.
+ *
+ * `preset` maps to a yt-dlp `-f` selector; `audio` means "extract audio".
+ * `custom` reveals a free-form selector input. `default` means "use Settings".
+ */
+export type FormatChoice =
+  | { kind: 'default' }
+  | { kind: 'preset'; selector: string }
+  | { kind: 'audio'; audioFormat: string }
+  | { kind: 'custom'; selector: string; container: string }
+
+export const DEFAULT_FORMAT_CHOICE: FormatChoice = { kind: 'default' }
+
+/** Translates a Downloads-view choice into the request sent to Rust. */
+export function toFormatOverride(choice: FormatChoice): FormatOverride | undefined {
+  switch (choice.kind) {
+    case 'default':
+      return undefined
+    case 'preset':
+      return { format: choice.selector }
+    case 'audio':
+      return { audioOnly: true, audioFormat: choice.audioFormat }
+    case 'custom':
+      return { format: choice.selector, container: choice.container }
+  }
+}
 
 /** Backends that are only used when the user forces them. */
 export interface OverrideState {
@@ -30,6 +59,11 @@ interface AppState {
   override: Backend | null
   setOverride: (backend: Backend | null) => void
   effectiveBackend: () => Backend
+
+  /** Per-download format choice for yt-dlp, shown in the Downloads view. */
+  formatChoice: FormatChoice
+  setFormatChoice: (choice: FormatChoice) => void
+  resetFormatChoice: () => void
 
   jobs: JobSnapshot[]
   settings: Settings | null
@@ -110,6 +144,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     return override ?? detected
   },
 
+  formatChoice: DEFAULT_FORMAT_CHOICE,
+  setFormatChoice: (choice) => set({ formatChoice: choice }),
+  resetFormatChoice: () => set({ formatChoice: DEFAULT_FORMAT_CHOICE }),
+
   jobs: [],
   settings: null,
   history: [],
@@ -156,7 +194,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   submit: async () => {
-    const { url, override, detected } = get()
+    const { url, override, detected, formatChoice } = get()
     const trimmed = url.trim()
     if (!trimmed) return
 
@@ -169,8 +207,15 @@ export const useAppStore = create<AppState>((set, get) => ({
         url: target,
         backend,
         title: trimmed.length <= 120 ? trimmed : undefined,
+        // Only yt-dlp understands format choices.
+        format: backend === 'ytdlp' ? toFormatOverride(formatChoice) : undefined,
       })
-      set((state) => ({ jobs: upsertJob(state.jobs, job), url: '', override: null }))
+      set((state) => ({
+        jobs: upsertJob(state.jobs, job),
+        url: '',
+        override: null,
+        formatChoice: DEFAULT_FORMAT_CHOICE,
+      }))
       get().setUrl('')
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) })

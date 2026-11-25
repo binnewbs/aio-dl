@@ -29,6 +29,51 @@ pub struct ParseState {
     pub items_total: Option<u64>,
     /// Items completed so far.
     pub items_done: u64,
+    /// Destination directory for this job, used to resolve artifact paths for
+    /// backends that never print one (spotDL).
+    pub output_dir: Option<String>,
+    /// Container spotDL was asked to produce, used when rebuilding its path.
+    pub spotify_ext: Option<String>,
+}
+
+impl ParseState {
+    pub fn with_output_dir(output_dir: impl Into<String>) -> Self {
+        Self {
+            output_dir: Some(output_dir.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Seeds the state with the destination directory and spotDL's container.
+    pub fn for_job(output_dir: impl Into<String>, spotify_format: &str) -> Self {
+        let ext = spotify_format.trim().trim_start_matches('.');
+        Self {
+            output_dir: Some(output_dir.into()),
+            spotify_ext: if ext.is_empty() {
+                None
+            } else {
+                Some(ext.to_string())
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// Returns the trimmed override when it is set and non-empty, else the default.
+fn pick(override_value: &Option<String>, default: &str) -> String {
+    override_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(default.trim())
+        .to_string()
+}
+
+/// Builds a path for a file inside `dir`, tolerating a missing directory.
+fn join_dir(dir: &Option<String>, file_name: &str) -> Option<String> {
+    let dir = dir.as_deref()?;
+    let path = std::path::Path::new(dir).join(file_name);
+    Some(path.display().to_string())
 }
 
 pub fn driver_for(backend: Backend) -> Box<dyn BackendDriver> {
@@ -76,10 +121,14 @@ fn push_extra(args: &mut Vec<String>, raw: &str) {
 
 pub struct YtDlpDriver;
 
+/// yt-dlp strips a leading `type:` prefix from `--progress-template`, so the
+/// marker has to live *inside* the template. We emit a fixed sentinel token
+/// followed by the values.
 static YTDLP_PROGRESS: Lazy<Regex> = Lazy::new(|| {
-    // percent|speed|eta|downloaded|total|total_estimate  (the last two may be "NA")
+    // AIO_PROGRESS|percent|speed|eta|downloaded|total|total_estimate
+    // The last two fields may be "NA".
     Regex::new(
-        r"^download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|(?P<downloaded>[^|]*)\|(?P<total>[^|]*)\|(?P<estimate>.*)$",
+        r"^AIO_PROGRESS\|(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|(?P<downloaded>[^|]*)\|(?P<total>[^|]*)\|(?P<estimate>[^|]*)$",
     )
     .expect("valid yt-dlp progress regex")
 });
@@ -108,7 +157,7 @@ impl BackendDriver for YtDlpDriver {
             "--no-colors".into(),
             "--progress".into(),
             "--progress-template".into(),
-            "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s"
+            "download:AIO_PROGRESS|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s"
                 .into(),
             "--print".into(),
             "after_move:filepath".into(),
@@ -121,20 +170,29 @@ impl BackendDriver for YtDlpDriver {
             args.push(dir.to_string());
         }
 
-        if settings.audio_only {
+        // A per-job choice from the Downloads view wins over the saved default.
+        let override_ = job.format.clone().unwrap_or_default();
+        let audio_only = override_.audio_only.unwrap_or(settings.audio_only);
+
+        let audio_format = pick(&override_.audio_format, &settings.audio_format);
+        let video_format = pick(&override_.format, &settings.video_format);
+        let container = pick(&override_.container, &settings.video_container);
+
+        if audio_only {
             args.push("--extract-audio".into());
-            if !settings.audio_format.trim().is_empty() {
+            if !audio_format.is_empty() {
                 args.push("--audio-format".into());
-                args.push(settings.audio_format.clone());
+                args.push(audio_format);
             }
         } else {
-            if !settings.video_format.trim().is_empty() {
+            if !video_format.is_empty() {
                 args.push("-f".into());
-                args.push(settings.video_format.clone());
+                args.push(video_format);
             }
-            if !settings.video_container.trim().is_empty() {
+            // "any" (or empty) means: let yt-dlp keep its native container.
+            if !container.is_empty() && !container.eq_ignore_ascii_case("any") {
                 args.push("--merge-output-format".into());
-                args.push(settings.video_container.clone());
+                args.push(container);
             }
         }
 
@@ -478,6 +536,13 @@ static SPOT_DONE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(downloaded|skipping|skipped)\b"#).expect("valid spotdl done regex")
 });
 
+/// Matches spotDL's per-song completion line, which embeds the filename stem:
+/// `Rick Astley - Never Gonna Give You Up: Done`
+static SPOT_ARTIST_TITLE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?P<stem>.+?):\s*(?:Done|Already downloaded)\s*$")
+        .expect("valid spotdl artifact regex")
+});
+
 impl BackendDriver for SpotDlDriver {
     fn args(
         &self,
@@ -556,6 +621,36 @@ impl BackendDriver for SpotDlDriver {
             });
         }
 
+        // `<Artists> - <Title>: Done` marks a finished song. It carries the
+        // filename stem, and spotDL never prints the written path, so the
+        // artifact path is rebuilt from the output template
+        // (`{artists} - {title}.{output-ext}`). This line does not contain the
+        // word "Downloaded", so it must be checked in its own branch.
+        if let Some(caps) = SPOT_ARTIST_TITLE.captures(trimmed) {
+            state.items_done += 1;
+            let percent = state
+                .items_total
+                .filter(|t| *t > 0)
+                .map(|t| ((state.items_done as f64 / t as f64) * 100.0).min(100.0));
+
+            let stem = caps.name("stem").map(|m| m.as_str().trim()).unwrap_or("");
+            let output_path = if stem.is_empty() {
+                None
+            } else {
+                let ext = state.spotify_ext.as_deref().unwrap_or("mp3");
+                join_dir(&state.output_dir, &format!("{stem}.{ext}"))
+            };
+
+            return Some(ProgressDelta {
+                items_done: Some(state.items_done),
+                items_total: state.items_total,
+                percent,
+                message: Some(trimmed.to_string()),
+                output_path,
+                ..Default::default()
+            });
+        }
+
         if SPOT_DONE.is_match(trimmed) {
             state.items_done += 1;
             let percent = state
@@ -620,6 +715,7 @@ mod tests {
             backend,
             output_dir: None,
             title: None,
+            format: None,
         }
     }
 
@@ -659,12 +755,97 @@ mod tests {
     }
 
     #[test]
+    fn ytdlp_per_job_format_override_wins_over_settings() {
+        let d = YtDlpDriver;
+
+        // Settings say 4K/mkv; the job asks for 720p/mp4.
+        let mut s = settings();
+        s.video_format = "bv*[height<=2160]+ba/b[height<=2160]".into();
+        s.video_container = "mkv".into();
+
+        let mut request = job("https://youtu.be/x", Backend::Ytdlp);
+        request.format = Some(crate::types::FormatOverride {
+            format: Some("bv*[height<=720]+ba/b[height<=720]".into()),
+            audio_only: Some(false),
+            audio_format: None,
+            container: Some("mp4".into()),
+        });
+
+        let args = d.args(&request, &s, None);
+        let f_idx = args.iter().position(|a| a == "-f").expect("-f present");
+        assert_eq!(args[f_idx + 1], "bv*[height<=720]+ba/b[height<=720]");
+
+        let c_idx = args
+            .iter()
+            .position(|a| a == "--merge-output-format")
+            .expect("container present");
+        assert_eq!(args[c_idx + 1], "mp4");
+
+        // The saved settings must not leak into the command.
+        assert!(!args.iter().any(|a| a.contains("2160")));
+        assert!(!args.iter().any(|a| a == "mkv"));
+    }
+
+    #[test]
+    fn ytdlp_per_job_audio_override_extracts_audio() {
+        let d = YtDlpDriver;
+        let mut s = settings();
+        s.audio_only = false;
+
+        let mut request = job("https://youtu.be/x", Backend::Ytdlp);
+        request.format = Some(crate::types::FormatOverride {
+            audio_only: Some(true),
+            audio_format: Some("flac".into()),
+            ..Default::default()
+        });
+
+        let args = d.args(&request, &s, None);
+        assert!(args.iter().any(|a| a == "--extract-audio"));
+        let idx = args
+            .iter()
+            .position(|a| a == "--audio-format")
+            .expect("audio format present");
+        assert_eq!(args[idx + 1], "flac");
+        // No video selector when extracting audio.
+        assert!(!args.iter().any(|a| a == "-f"));
+    }
+
+    #[test]
+    fn ytdlp_without_override_uses_settings() {
+        let d = YtDlpDriver;
+        let mut s = settings();
+        s.video_format = "bv*[height<=1080]+ba/b[height<=1080]".into();
+
+        let args = d.args(&job("https://youtu.be/x", Backend::Ytdlp), &s, None);
+        let idx = args.iter().position(|a| a == "-f").expect("-f present");
+        assert_eq!(args[idx + 1], "bv*[height<=1080]+ba/b[height<=1080]");
+    }
+
+    #[test]
+    fn ytdlp_empty_override_fields_fall_back_to_settings() {
+        let d = YtDlpDriver;
+        let mut s = settings();
+        s.video_format = "bv*[height<=480]+ba/b[height<=480]".into();
+
+        // An override with only `audio_only` set must not blank the selector.
+        let mut request = job("https://youtu.be/x", Backend::Ytdlp);
+        request.format = Some(crate::types::FormatOverride {
+            audio_only: Some(false),
+            ..Default::default()
+        });
+
+        let args = d.args(&request, &s, None);
+        let idx = args.iter().position(|a| a == "-f").expect("-f present");
+        assert_eq!(args[idx + 1], "bv*[height<=480]+ba/b[height<=480]");
+    }
+
+    #[test]
     fn ytdlp_progress_line() {
         let d = YtDlpDriver;
         let mut state = ParseState::default();
         let delta = d
             .parse_line(
-                "download:  45.2%| 1.5MiB/s|00:12|1048576|2320000|2320000",
+                "AIO_PROGRESS|  45.2%| 1.5MiB/s|00:12|1048576|2320000|2320000",
                 &mut state,
             )
             .expect("parsed");
@@ -675,13 +856,56 @@ mod tests {
         assert_eq!(delta.eta_seconds, Some(12));
     }
 
+    /// Regression test: the emitted line must NOT be expected to start with
+    /// `download:`. yt-dlp treats that prefix as a template type and strips it,
+    /// which previously meant progress was never parsed and the bar stayed at 0.
+    #[test]
+    fn ytdlp_actual_output_format_is_parsed() {
+        let d = YtDlpDriver;
+        let mut state = ParseState::default();
+
+        // Verbatim output from a real run (note: no `download:` prefix).
+        let real_line = "AIO_PROGRESS|  0.9%|   8.34MiB/s|00:07|538624|61878609|NA";
+        let delta = d
+            .parse_line(real_line, &mut state)
+            .expect("real line parsed");
+
+        assert_eq!(delta.percent, Some(0.9));
+        assert_eq!(delta.downloaded_bytes, Some(538_624));
+        assert_eq!(delta.total_bytes, Some(61_878_609));
+        assert_eq!(delta.eta_seconds, Some(7));
+        assert!(delta.speed_bytes_per_sec.unwrap() > 8_000_000.0);
+
+        // yt-dlp reports "Unknown B/s" / "Unknown" before it has a reading;
+        // those must not be treated as numbers.
+        let unknown = d
+            .parse_line(
+                "AIO_PROGRESS|  0.0%| Unknown B/s|Unknown|1024|61878609|NA",
+                &mut state,
+            )
+            .expect("unknown-speed line still parses");
+        assert_eq!(unknown.percent, Some(0.0));
+        assert!(unknown.speed_bytes_per_sec.is_none());
+        assert!(unknown.eta_seconds.is_none());
+
+        // The old-style line must no longer be treated as progress.
+        assert!(
+            d.parse_line(
+                "download:  45.2%| 1.5MiB/s|00:12|1048576|2320000|2320000",
+                &mut state
+            )
+            .is_none(),
+            "the stripped-prefix form should not parse as progress"
+        );
+    }
+
     #[test]
     fn ytdlp_progress_keeps_total_when_missing() {
         let d = YtDlpDriver;
         let mut state = ParseState::default();
-        let _ = d.parse_line("download:  10%| 1MiB/s|00:30|100|1000|1000", &mut state);
+        let _ = d.parse_line("AIO_PROGRESS|  10%| 1MiB/s|00:30|100|1000|1000", &mut state);
         let delta = d
-            .parse_line("download:  20%| 1MiB/s|00:25|200|NA|NA", &mut state)
+            .parse_line("AIO_PROGRESS|  20%| 1MiB/s|00:25|200|NA|NA", &mut state)
             .expect("parsed");
         assert_eq!(delta.total_bytes, Some(1000));
     }
@@ -691,7 +915,7 @@ mod tests {
         let d = YtDlpDriver;
         let mut state = ParseState::default();
         let delta = d
-            .parse_line("download:  30%| 1MiB/s|00:20|300|NA|1000", &mut state)
+            .parse_line("AIO_PROGRESS|  30%| 1MiB/s|00:20|300|NA|1000", &mut state)
             .expect("parsed");
         assert_eq!(delta.total_bytes, Some(1000));
         assert_eq!(delta.percent, Some(30.0));
@@ -702,7 +926,7 @@ mod tests {
         let d = YtDlpDriver;
         let mut state = ParseState::default();
         let delta = d
-            .parse_line("download:  30%| 1MiB/s|00:20|300|NA|NA", &mut state)
+            .parse_line("AIO_PROGRESS|  30%| 1MiB/s|00:20|300|NA|NA", &mut state)
             .expect("parsed");
         assert_eq!(delta.total_bytes, None);
         assert_eq!(delta.downloaded_bytes, Some(300));
@@ -795,6 +1019,32 @@ mod tests {
             .expect("done");
         assert_eq!(done.items_done, Some(1));
         assert_eq!(done.percent, Some(25.0));
+    }
+
+    #[test]
+    fn spotdl_reconstructs_artifact_path_from_done_line() {
+        let d = SpotDlDriver;
+        let mut state = ParseState::for_job("/music", "flac");
+
+        let delta = d
+            .parse_line("Rick Astley - Never Gonna Give You Up: Done", &mut state)
+            .expect("done line");
+
+        // spotDL prints no path, so the path is rebuilt from the template.
+        assert_eq!(
+            delta.output_path.as_deref(),
+            Some("/music/Rick Astley - Never Gonna Give You Up.flac")
+        );
+    }
+
+    #[test]
+    fn spotdl_artifact_path_is_none_without_output_dir() {
+        let d = SpotDlDriver;
+        let mut state = ParseState::default();
+        let delta = d
+            .parse_line("Artist - Title: Done", &mut state)
+            .expect("done line");
+        assert!(delta.output_path.is_none());
     }
 
     #[test]

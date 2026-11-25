@@ -37,6 +37,24 @@ const VIDEO_CONTAINERS = ['mp4', 'mkv', 'webm', 'any']
 const SPOTIFY_FORMATS = ['mp3', 'flac', 'ogg', 'opus', 'm4a', 'wav']
 const SPOTIFY_BITRATES = ['auto', 'disable', '128k', '192k', '256k', '320k']
 
+/** Friendly quality presets mapped to yt-dlp `-f` selectors. */
+const VIDEO_QUALITY_PRESETS: { label: string; value: string }[] = [
+  { label: 'Best available', value: 'bv*+ba/b' },
+  { label: 'Up to 2160p (4K)', value: 'bv*[height<=2160]+ba/b[height<=2160]' },
+  { label: 'Up to 1440p', value: 'bv*[height<=1440]+ba/b[height<=1440]' },
+  { label: 'Up to 1080p', value: 'bv*[height<=1080]+ba/b[height<=1080]' },
+  { label: 'Up to 720p', value: 'bv*[height<=720]+ba/b[height<=720]' },
+  { label: 'Up to 480p', value: 'bv*[height<=480]+ba/b[height<=480]' },
+  { label: 'Smallest file', value: 'wv*+ba/w' },
+]
+
+const CUSTOM_QUALITY = 'custom'
+
+function qualityValue(format: string): string {
+  const match = VIDEO_QUALITY_PRESETS.find((preset) => preset.value === format.trim())
+  return match?.value ?? CUSTOM_QUALITY
+}
+
 export function SettingsView() {
   const settings = useAppStore((s) => s.settings)
   const saveSettings = useAppStore((s) => s.saveSettings)
@@ -277,17 +295,52 @@ export function SettingsView() {
                   ) : (
                     <>
                       <Field>
-                        <FieldLabel htmlFor="video-format">Format selector</FieldLabel>
-                        <Input
-                          id="video-format"
-                          value={draft.videoFormat}
-                          spellCheck={false}
-                          onChange={(event) => patch({ videoFormat: event.target.value })}
-                        />
+                        <FieldLabel htmlFor="video-quality">Video quality</FieldLabel>
+                        <Select
+                          value={qualityValue(draft.videoFormat)}
+                          onValueChange={(value) => {
+                            if (value !== CUSTOM_QUALITY) {
+                              patch({ videoFormat: String(value) })
+                            }
+                          }}
+                        >
+                          <SelectTrigger id="video-quality" className="w-64">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {VIDEO_QUALITY_PRESETS.map((preset) => (
+                                <SelectItem key={preset.value} value={preset.value}>
+                                  {preset.label}
+                                </SelectItem>
+                              ))}
+                              <SelectItem value={CUSTOM_QUALITY}>
+                                Custom selector…
+                              </SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
                         <FieldDescription>
-                          yt-dlp `-f` expression. `bv*+ba/b` picks the best video and audio.
+                          Caps the resolution yt-dlp picks for each download.
                         </FieldDescription>
                       </Field>
+
+                      {qualityValue(draft.videoFormat) === CUSTOM_QUALITY ? (
+                        <Field>
+                          <FieldLabel htmlFor="video-format">Custom format selector</FieldLabel>
+                          <Input
+                            id="video-format"
+                            value={draft.videoFormat}
+                            spellCheck={false}
+                            placeholder="bv*[height<=1080]+ba/b"
+                            onChange={(event) => patch({ videoFormat: event.target.value })}
+                          />
+                          <FieldDescription>
+                            Raw yt-dlp `-f` expression. See the yt-dlp docs for format syntax.
+                          </FieldDescription>
+                        </Field>
+                      ) : null}
+
                       <Field>
                         <FieldLabel htmlFor="video-container">Container</FieldLabel>
                         <Select
@@ -303,12 +356,15 @@ export function SettingsView() {
                             <SelectGroup>
                               {VIDEO_CONTAINERS.map((container) => (
                                 <SelectItem key={container} value={container}>
-                                  {container}
+                                  {container === 'any' ? 'Any (no conversion)' : container}
                                 </SelectItem>
                               ))}
                             </SelectGroup>
                           </SelectContent>
                         </Select>
+                        <FieldDescription>
+                          Merged output container. "Any" keeps yt-dlp's native choice.
+                        </FieldDescription>
                       </Field>
                     </>
                   )}

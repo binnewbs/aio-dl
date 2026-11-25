@@ -14,9 +14,9 @@ fn ytdlp_fixture_stream_produces_monotonic_progress() {
 
     // Verbatim output shape from yt-dlp with our --progress-template.
     let lines = [
-        "download:  10.0%| 1.00MiB/s|00:30|100000|1000000|1000000",
-        "download:  50.0%| 2.00MiB/s|00:10|500000|1000000|1000000",
-        "download: 100.0%| 2.00MiB/s|00:00|1000000|1000000|1000000",
+        "AIO_PROGRESS|  10.0%| 1.00MiB/s|00:30|100000|1000000|1000000",
+        "AIO_PROGRESS|  50.0%| 2.00MiB/s|00:10|500000|1000000|1000000",
+        "AIO_PROGRESS| 100.0%| 2.00MiB/s|00:00|1000000|1000000|1000000",
     ];
 
     let mut percents = Vec::new();

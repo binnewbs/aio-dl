@@ -32,6 +32,7 @@ export function HistoryView() {
   const retry = useAppStore((s) => s.retry)
   const deleteHistory = useAppStore((s) => s.deleteHistory)
   const clearHistoryAll = useAppStore((s) => s.clearHistoryAll)
+  const outputDir = useAppStore((s) => s.settings?.outputDir)
   const [filter, setFilter] = useState<Filter>('all')
 
   const filtered = useMemo(() => {
@@ -145,13 +146,15 @@ export function HistoryView() {
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
-                        {entry.outputPath ? (
+                        {entry.status === 'completed' ? (
                           <Button
                             variant="ghost"
                             size="icon-sm"
                             aria-label="Open folder"
                             title="Open folder"
-                            onClick={() => void revealPath(entry.outputPath as string)}
+                            onClick={() =>
+                              void revealPath(entry.outputPath ?? outputDir ?? '')
+                            }
                           >
                             <FolderOpenIcon />
                           </Button>

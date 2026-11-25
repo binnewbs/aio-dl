@@ -65,6 +65,7 @@ fn snapshot_from_request(req: &JobRequest) -> JobSnapshot {
         created_at: now_millis(),
         finished_at: None,
         log_tail: Vec::new(),
+        format: req.format.clone(),
     }
 }
 
@@ -207,6 +208,7 @@ fn spawn_job(app: AppHandle, shared: SharedJobs, job: JobSnapshot, settings: Set
             backend: job_for_task.backend,
             output_dir: None,
             title: Some(job_for_task.title.clone()),
+            format: job_for_task.format.clone(),
         };
 
         let driver = driver_for(backend);
@@ -250,7 +252,7 @@ fn spawn_job(app: AppHandle, shared: SharedJobs, job: JobSnapshot, settings: Set
             manager.running.insert(id.clone(), RunningJob { child });
         }
 
-        let mut state = ParseState::default();
+        let mut state = ParseState::for_job(settings.output_dir.clone(), &settings.spotify_format);
         let mut last_error: Option<String> = None;
         let mut cancelled = false;
 
@@ -396,7 +398,7 @@ fn handle_line(
     }
 
     // Keep a bounded log tail for the UI, without spamming every progress tick.
-    let is_progress = trimmed.starts_with("download:") || trimmed.starts_with("[#");
+    let is_progress = trimmed.starts_with("AIO_PROGRESS|") || trimmed.starts_with("[#");
     if !is_progress {
         push_log(job, trimmed.to_string());
         emit_log(app, id, trimmed.to_string());
@@ -438,6 +440,23 @@ fn finish_job(
         if status == JobStatus::Completed {
             job.percent = Some(100.0);
 
+            // Backends differ in what they report: yt-dlp prints the final
+            // path, aria2c prints an absolute path, gallery-dl prints each
+            // file, and spotDL prints none. When nothing was reported (or the
+            // reported path no longer exists), fall back to the output
+            // directory so "open containing folder" always works.
+            let reported_exists = job
+                .output_path
+                .as_deref()
+                .map(std::path::Path::new)
+                .map(|p| p.exists())
+                .unwrap_or(false);
+
+            if !reported_exists {
+                let settings = storage::load_settings(app);
+                job.output_path = Some(settings.output_dir.clone());
+            }
+
             // Trust the filesystem over the backend's often-missing size field
             // (yt-dlp reports `NA` for total_bytes_estimate on many sites).
             if let Some(meta) = job
@@ -456,11 +475,14 @@ fn finish_job(
             }
 
             // Replace a URL-only title with the actual downloaded file name.
+            // Only for a real file, not the directory fallback above.
             if (job.title == job.url || job.title.trim().is_empty())
                 && let Some(name) = job
                     .output_path
                     .as_deref()
-                    .and_then(|p| std::path::Path::new(p).file_name())
+                    .map(std::path::Path::new)
+                    .filter(|p| p.is_file())
+                    .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str())
             {
                 job.title = name.to_string();
@@ -561,6 +583,7 @@ pub fn retry(app: AppHandle, shared: SharedJobs, id: &str) -> Result<JobSnapshot
             backend: job.backend,
             output_dir: None,
             title: Some(job.title.clone()),
+            format: job.format.clone(),
         }
     };
     enqueue(app, shared, request)

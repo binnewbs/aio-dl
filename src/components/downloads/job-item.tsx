@@ -22,12 +22,27 @@ import {
 } from '@/components/ui/collapsible'
 import { Separator } from '@/components/ui/separator'
 
-function progressValue(job: JobSnapshot): number {
+/**
+ * 0–100 when a real percentage is known, otherwise `null` so the bar renders
+ * as indeterminate (gallery-dl cannot know a total up front).
+ */
+function progressValue(job: JobSnapshot): number | null {
+  if (job.status === 'completed') return 100
   if (job.percent != null) return Math.min(100, Math.max(0, job.percent))
   if (job.itemsTotal && job.itemsTotal > 0) {
     return Math.min(100, (job.itemsDone / job.itemsTotal) * 100)
   }
-  return 0
+  return null
+}
+
+/** Short right-aligned readout: `45%`, or `12 files` when there is no total. */
+function progressLabel(job: JobSnapshot): string | null {
+  if (job.status === 'completed') return '100%'
+  if (job.percent != null) return `${Math.floor(job.percent)}%`
+  if (job.itemsDone > 0) {
+    return `${job.itemsDone} file${job.itemsDone === 1 ? '' : 's'}`
+  }
+  return null
 }
 
 function detailLine(job: JobSnapshot): string {
@@ -62,7 +77,11 @@ export function JobItem({ job }: { job: JobSnapshot }) {
   const statusMeta = STATUS_META[job.status]
   const isActive = job.status === 'running' || job.status === 'queued'
   const canRetry = job.status === 'failed' || job.status === 'cancelled' || job.status === 'interrupted'
-  const hasOutput = Boolean(job.outputPath)
+
+  // Prefer the exact artifact path. Backends that never print one still let us
+  // open the destination folder, so fall back to the configured output dir.
+  const outputDir = useAppStore((s) => s.settings?.outputDir)
+  const folderPath = job.outputPath ?? (job.status === 'completed' ? outputDir : undefined)
 
   return (
     <Item variant="outline" className="flex-col items-stretch gap-0">
@@ -81,13 +100,13 @@ export function JobItem({ job }: { job: JobSnapshot }) {
         </ItemContent>
 
         <ItemActions>
-          {hasOutput ? (
+          {folderPath ? (
             <Button
               variant="ghost"
               size="icon-sm"
               title="Open containing folder"
               aria-label="Open containing folder"
-              onClick={() => void ipc.revealPath(job.outputPath as string)}
+              onClick={() => void ipc.revealPath(folderPath)}
             >
               <FolderOpenIcon />
             </Button>
@@ -117,24 +136,22 @@ export function JobItem({ job }: { job: JobSnapshot }) {
         </ItemActions>
       </div>
 
-      <div className="mt-2 w-full">
+      <div className="mt-2 flex w-full items-center gap-3">
         <Progress
           value={progressValue(job)}
           aria-label={`Download progress for ${job.title}`}
-          className={job.status === 'running' && job.percent == null ? 'opacity-60' : undefined}
+          className="flex-1"
         />
+        <span className="w-16 shrink-0 text-right text-xs text-muted-foreground tabular-nums">
+          {progressLabel(job) ?? (isActive ? 'working…' : '')}
+        </span>
       </div>
 
       <ItemFooter className="mt-2">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          {job.percent != null ? (
-            <span>{Math.floor(job.percent)}%</span>
-          ) : isActive ? (
-            <span>Working…</span>
-          ) : null}
           {job.outputPath ? (
             <span className="truncate" title={job.outputPath}>
-              {job.outputPath.split(/[\\/]/).pop()}
+              {job.outputPath.split(/[\\/]/).filter(Boolean).pop()}
             </span>
           ) : null}
         </div>
